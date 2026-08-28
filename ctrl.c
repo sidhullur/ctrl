@@ -67,9 +67,9 @@ static uint8_t pendingResponse[64];
 // exposed only within the file; global vars in other files can have same name
 
 typedef enum {
-    HANDSHAKE,
-    SUBCOMMAND_INIT,
-    STREAM_INPUT
+    CONTROLLER_STATE_HANDSHAKE,
+    CONTROLLER_STATE_SUBCOMMAND_INIT,
+    CONTROLLER_STATE_STREAM_INPUT
 } ControllerState;
 
 static volatile ControllerState global_state;
@@ -102,8 +102,15 @@ void A_buttonSpam(struct InputPacket* packet) {
 }
 
 void hid_task(void) {
+    if (!tud_hid_ready()) return;
 
-    if (global_state != STREAM_INPUT || !tud_hid_ready()) return; 
+    if (srResponsePending) {
+        tud_hid_report(0, &pendingResponse, PACKET_LEN);
+        srResponsePending = false;
+        return;
+    }
+
+    if (global_state != CONTROLLER_STATE_STREAM_INPUT) return; 
 
     static uint32_t last_report_time = 0;
     uint32_t current_time = board_millis();
@@ -172,7 +179,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                     
                     case 0x04:
                     
-                        global_state = SUBCOMMAND_INIT;
+                        global_state = CONTROLLER_STATE_SUBCOMMAND_INIT;
                         break;
                 }
                 break;
@@ -246,7 +253,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             &pendingResponse[20]
                         );
 
-                        if (global_state == SUBCOMMAND_INIT) {
+                        if (global_state == CONTROLLER_STATE_SUBCOMMAND_INIT) {
                             tud_hid_report(0, &pendingResponse, PACKET_LEN);
                         } else {
                             srResponsePending = true;
@@ -262,7 +269,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                         // queue the packet if in input stream mode
                         // otherwise send immediately
 
-                        if (global_state == SUBCOMMAND_INIT) {
+                        if (global_state == CONTROLLER_STATE_SUBCOMMAND_INIT) {
                             tud_hid_report(0, &pendingResponse, PACKET_LEN);
                         } else {
                             srResponsePending = true;
@@ -276,7 +283,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                         // queue the packet if in input stream mode
                         // otherwise send immediately
 
-                        if (global_state == SUBCOMMAND_INIT) {
+                        if (global_state == CONTROLLER_STATE_SUBCOMMAND_INIT) {
                             tud_hid_report(0, &pendingResponse, PACKET_LEN);
                         } else {
                             srResponsePending = true;
@@ -290,7 +297,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                         // otherwise send immediately
 
                         // tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        global_state = STREAM_INPUT;
+                        global_state = CONTROLLER_STATE_STREAM_INPUT;
                         break;
 
                     case 0x00:
