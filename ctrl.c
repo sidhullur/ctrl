@@ -5,10 +5,11 @@
 #include "spi_flash_data.h"
 
 #define PACKET_LEN 64
-#define REPORT_INTERVAL_MS 8
+#define REPORT_INTERVAL_MS 17 // change later
 #define SUBCMD_RID 0x21
 #define INPUT_RID 0x30
 #define HANDSHAKE_RESPONSE_RID 0x81
+#define SPI_READ_MAX_LEN 0x1D // protocol cap on bytes per SPI flash read
 
 static bool sr_pending = false;
 static uint8_t sr_response[63]; // first byte is report ID
@@ -86,7 +87,8 @@ void handle_handshake(const uint8_t* buffer) {
             break;
     }
 
-    tud_hid_report(HANDSHAKE_RESPONSE_RID, &sr_response, sizeof(sr_response));
+    // tud_hid_report(HANDSHAKE_RESPONSE_RID, &sr_response, sizeof(sr_response));
+    sr_pending = true;
 }
 
 void toggle_imu(const uint8_t choice) {
@@ -141,16 +143,22 @@ void fill_subcommand_response_payload(
         
         case 0x10:
             *ackSlot = 0x90;
+
+            // Clamp to the protocol max so a malformed request can't write
+            // past sr_response (payload_buffer is &sr_response[14], data
+            // lands at &payload_buffer[5]; only 44 bytes remain there).
+            uint8_t size = input_packet[15];
+            if (size > SPI_READ_MAX_LEN) size = SPI_READ_MAX_LEN;
+
             payload_buffer[0] = input_packet[11];
             payload_buffer[1] = input_packet[12];
             payload_buffer[2] = input_packet[13];
             payload_buffer[3] = input_packet[14];
 
-            payload_buffer[4] = input_packet[15];
+            payload_buffer[4] = size;
 
             uint32_t base_addr = (input_packet[11]) | (input_packet[12] << 8) |
             (input_packet[13] << 16) | (input_packet[14] << 24);
-            uint8_t size = input_packet[15];
 
             spi_flash_read(base_addr, size, &payload_buffer[5]);
             break;
@@ -301,7 +309,11 @@ void hid_task(void) {
     if (!tud_hid_ready()) return; // line ready to accept new input
 
     if (sr_pending) { // prioritize subcommand responses
-        tud_hid_report(SUBCMD_RID, &sr_response, sizeof(sr_response));
+        
+        uint8_t rid = (global_state == CONTROLLER_STATE_HANDSHAKE) ? 
+            HANDSHAKE_RESPONSE_RID : SUBCMD_RID;
+    
+        tud_hid_report(rid, &sr_response, sizeof(sr_response));
         sr_pending = false;
         return;
     }
