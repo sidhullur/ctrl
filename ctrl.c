@@ -24,7 +24,7 @@ typedef enum {
 //     INPUT_MODE_HID
 // } InputMode;
 
-typedef struct {
+typedef struct __attribute__((packed)){
     uint8_t timer;
     uint8_t battery_con;
 
@@ -294,7 +294,10 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             hid_report_type_t report_type,
                             uint8_t const* buffer, uint16_t bufsize) 
 {
-    if (report_type != HID_REPORT_TYPE_OUTPUT) return;
+    //if (report_type != HID_REPORT_TYPE_OUTPUT) return;
+    if (report_type != HID_REPORT_TYPE_OUTPUT && 
+        report_type != HID_REPORT_TYPE_INVALID) return;
+
     if (!sr_pending)
         memset(&sr_response, 0, sizeof(sr_response));
 
