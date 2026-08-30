@@ -1,130 +1,273 @@
-#include "bsp/board_api.h"
+//#include "bsp/board_api.h"
+#include "pico/stdlib.h"
 #include "tusb.h"
 #include <stdint.h>
+#include "spi_flash_data.h"
 
 #define PACKET_LEN 64
 #define REPORT_INTERVAL_MS 8
+#define SUBCMD_RID 0x21
+#define INPUT_RID 0x30
+#define HANDSHAKE_RESPONSE_RID 0x81
 
-// --------------------- Used purely for subcommand handling
+static bool sr_pending = false;
+static uint8_t sr_response[63]; // first byte is report ID
+typedef enum {
+    CONTROLLER_STATE_HANDSHAKE,
+    CONTROLLER_STATE_STREAM_INPUT
+} ControllerState;
 
-// 1. Factory Analog Stick Calibration (Address 0x603D, 18 bytes)
-// Standard center (0x800), min (0x100), max (0xF00), deadzone (~0x064)
-static const uint8_t factory_stick_cal[18] = {
-    // Left Stick: Max X/Y, Center X/Y, Min X/Y
-    0xE0, 0x07, 0x7E, 0x00, 0x08, 0x80, 0x00, 0x00, 0x60,
-    // Right Stick: Center X/Y, Min X/Y, Max X/Y
-    0x00, 0x08, 0x80, 0x00, 0x00, 0x60, 0xE0, 0x07, 0x7E
-};
+// typedef enum {
+//     INPUT_MODE_STANDARD,//
+//     INPUT_MODE_HID
+// } InputMode;
 
-// 2. Factory 6-Axis IMU Sensor Calibration (Address 0x6020, 24 bytes)
-static const uint8_t factory_imu_cal[24] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Accel Origin (X, Y, Z)
-    0x00, 0x40, 0x00, 0x40, 0x00, 0x40, // Accel Sens: ±8G sensitivity
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Gyro Origin (X, Y, Z)
-    0x3B, 0x34, 0x3B, 0x34, 0x3B, 0x34  // Gyro Sens: ±2000dps sensitivity
-};
+typedef struct {
+    uint8_t timer;
+    uint8_t battery_con;
 
-// 3. Controller Body / Button Colors (Address 0x6050, 13 bytes)
-static const uint8_t body_colors[13] = {
-    0x32, 0x32, 0x32, // Body: Dark Charcoal (#323232)
-    0xFF, 0xFF, 0xFF, // Buttons: White (#FFFFFF)
-    0x20, 0x20, 0x20, // Left Grip (#202020)
-    0x20, 0x20, 0x20, // Right Grip (#202020)
-    0x01              // 0x01 = Custom colors active
-};
+    uint8_t button_status[3];
+    uint8_t left_stick[3];
+    uint8_t right_stick[3];
+    uint8_t vibrator_byte;
 
-// -----------------------------------------------------------------
+    uint8_t imu_data[36];
+    uint8_t padding[15];
 
-void spi_flash_read(uint32_t fullAddr, uint8_t length, uint8_t *destBuffer) {
-    // fullAddr indicates what type of info is requested, needs to be filled in
-    switch(fullAddr) {
+} inputPacket;
 
-        case 0x6020: // imu motion calibration requested
-            if (length <= sizeof(factory_imu_cal))
-                memcpy(destBuffer, factory_imu_cal, length);
+static ControllerState global_state = CONTROLLER_STATE_HANDSHAKE;
+static uint8_t global_counter = 0;
+// static InputMode global_input_mode = INPUT_MODE_STANDARD;
+
+void set_controller_haptics(const uint8_t* rumble_data) {
+    // TODO: read 8 bytes in a row and control actual hardware
+}
+
+void set_controller_LEDs(const uint8_t* led_data) {
+    // TODO: read this singular byte and set the controller's LEDs
+}
+
+void handle_handshake(const uint8_t* buffer) {
+    // CONTROLLER_STATE_HANDSHAKE - send immediately, don't queue
+    sr_response[0] = buffer[1];
+
+    // skipped assignments are already 0x00
+    switch(buffer[1]) {
+        case 0x01:
+            sr_response[2] = 0x03;
+
+            sr_response[3] = mac_addr[5];
+            sr_response[4] = mac_addr[4];
+            sr_response[5] = mac_addr[3];
+            sr_response[6] = mac_addr[2];
+            sr_response[7] = mac_addr[1];
+            sr_response[8] = mac_addr[0];
+
             break;
         
-        case 0x603D: // factory stick calibration requested
-            if (length <= sizeof(factory_stick_cal))
-                memcpy(destBuffer, factory_stick_cal, length);
+        case 0x04:
+
+            global_state = CONTROLLER_STATE_STREAM_INPUT;
             break;
         
-        case 0x6050: // colors requested
-            if (length <= sizeof(body_colors))
-                memcpy(destBuffer, body_colors, length);
+        case 0x05:
+
+            global_state = CONTROLLER_STATE_HANDSHAKE;
             break;
         
+        // just ack
+        case 0x02:
+        case 0x03:
+        case 0x06:
+            break;
+        
+        default: // 91/92 ignored
+            break;
+    }
+
+    tud_hid_report(HANDSHAKE_RESPONSE_RID, &sr_response, sizeof(sr_response));
+}
+
+void toggle_imu(const uint8_t choice) {
+    // TODO: Allow IMU values from controller to pass through to the system
+}
+
+void toggle_vibration(const uint8_t choice) {
+    // TODO: Globally decides whether vibration data (sent from console)
+    // should pass through to the physical controller.
+}
+
+void fill_subcommand_response_payload(
+    uint8_t* ackSlot, uint8_t* payload_buffer, const uint8_t* input_packet) {
+    // srPending set to true immediately after this is called.
+
+    *ackSlot = 0x80;
+
+    switch(input_packet[10]) { // subcommand
+
+        case 0x02:
+            *ackSlot = 0x82;
+
+            payload_buffer[0] = 0x03;
+            payload_buffer[1] = 0x48;
+
+            payload_buffer[2] = 0x03;
+
+            payload_buffer[3] = 0x02;
+
+            payload_buffer[4] = mac_addr[0];
+            payload_buffer[5] = mac_addr[1];
+            payload_buffer[6] = mac_addr[2];
+            payload_buffer[7] = mac_addr[3];
+            payload_buffer[8] = mac_addr[4];
+            payload_buffer[9] = mac_addr[5];
+
+            payload_buffer[10] = 0x01;
+            payload_buffer[11] = 0x01;
+            break;
+        
+        case 0x03:
+            // switch(input_packet[11]) { // input type
+            //     case 0x30:
+            //         global_input_mode = INPUT_MODE_STANDARD;
+            //         break;
+                
+            //     case 0x3F:
+            //         global_input_mode = INPUT_MODE_HID;
+            //         break;
+            // }
+            break;
+        
+        case 0x10:
+            *ackSlot = 0x90;
+            payload_buffer[0] = input_packet[11];
+            payload_buffer[1] = input_packet[12];
+            payload_buffer[2] = input_packet[13];
+            payload_buffer[3] = input_packet[14];
+
+            payload_buffer[4] = input_packet[15];
+
+            uint32_t base_addr = (input_packet[11]) | (input_packet[12] << 8) |
+            (input_packet[13] << 16) | (input_packet[14] << 24);
+            uint8_t size = input_packet[15];
+
+            spi_flash_read(base_addr, size, &payload_buffer[5]);
+            break;
+
+        case 0x30:
+            set_controller_LEDs(&input_packet[11]);
+            break;
+        
+        case 0x40:
+            toggle_imu(input_packet[11]);
+            break;
+        
+        case 0x48:
+            toggle_vibration(input_packet[11]);
+            break;
+        
+        case 0x04:
+            // TODO: Implement later
+            break;
+
+        case 0x05:
+            // TODO: Implement Maybe
+            *ackSlot = 0x83;
+            break;
+        
+        case 0x31:
+            *ackSlot = 0xB0;
+            break;
+
+        case 0x43:
+            *ackSlot = 0xC0;
+            break;
+        
+        case 0x06:
+        case 0x07:
+        case 0x11:
+        case 0x12:
+        case 0x41:
+        case 0x42:
+            // TODO: Implement later
+            break;
+        
+        case 0x08:
         default:
             break;
 
     }
 }
 
-// volatile provides compiler optimizations
-static volatile bool srResponsePending = false;
-static uint8_t pendingResponse[64];
-// already global, but declaring static is a good practice for the linker
-// exposed only within the file; global vars in other files can have same name
-
-typedef enum {
-    CONTROLLER_STATE_HANDSHAKE,
-    CONTROLLER_STATE_SUBCOMMAND_INIT,
-    CONTROLLER_STATE_STREAM_INPUT
-} ControllerState;
-
-static volatile ControllerState global_state;
-static volatile uint8_t global_counter = 0;
-struct InputPacket {
-    uint8_t reportID; // always 0x30
-    uint8_t sequenceID; // increment by one for each packet
-    uint8_t connectionBattery; // 4 bytes connection, 4 bytes battery
-    uint8_t rightButtons; // ABXY
-    uint8_t middleButtons; // Home, Share
-    uint8_t leftButtons; // D-pad
-    uint8_t leftStick[3]; // XYZ (or something like that)
-    uint8_t rightStick[3];
-    int  padding[13]; // all 0s
-};
-
-void A_buttonSpam(struct InputPacket* packet) {
-    memset(packet, 0, PACKET_LEN); 
-
-    packet->reportID = 0x30;
-    packet->sequenceID = global_counter;
-    packet->connectionBattery = 0x91; //replace later
-    packet->rightButtons = 0x08; // A button spam
-
-    packet->leftStick[1] = 0x08;
-    packet->leftStick[2] = 0x80;
-
-    packet->rightStick[1] = 0x08;
-    packet->rightStick[2] = 0x80;
+uint8_t get_battery_con() {
+    // TODO: Implement real battery logging
+    // second digit will always be 1.
+    return 0x91;
 }
 
-void hid_task(void) {
-    if (!tud_hid_ready()) return;
+void set_button_status(uint8_t* buffer) {
+    // TODO: sets three bytes from controller
+    buffer[0] = 0x08; // A button pressed
+    buffer[1] = 0x00;
+    buffer[2] = 0x00;
+}
+void set_left_stick_status(uint8_t* buffer) {
+    // TODO: sets three bytes from controller
+    buffer[0] = 0x00; // neutral
+    buffer[1] = 0x08;
+    buffer[2] = 0x80;
+}
+void set_right_stick_status(uint8_t* buffer) {
+    // TODO: sets three bytes from controller
+    buffer[0] = 0x00; // neutral
+    buffer[1] = 0x08;
+    buffer[2] = 0x80;
+}
 
-    if (srResponsePending) {
-        tud_hid_report(0, &pendingResponse, PACKET_LEN);
-        srResponsePending = false;
-        return;
+void handle_rumble(const uint8_t* input_packet, uint8_t report_type) {
+
+    set_controller_haptics(&input_packet[2]);
+
+    switch(report_type) {
+        case 0x10: // no response needed
+            break;
+
+        case 0x01:
+            sr_response[0] = global_counter++;
+            sr_response[1] = get_battery_con(); // SET BATTERY CON;
+
+            set_button_status(&sr_response[2]);
+            set_left_stick_status(&sr_response[5]);
+            set_right_stick_status(&sr_response[8]);
+
+            sr_response[11] = 0x80;
+            sr_response[13] = input_packet[10]; // echo subcommand
+            // byte 12 is the ack format that varies -> filled in handler
+
+            fill_subcommand_response_payload(
+                &sr_response[12], &sr_response[14], input_packet);
+            sr_pending = true;
+            break;
     }
-
-    if (global_state != CONTROLLER_STATE_STREAM_INPUT) return; 
-
-    static uint32_t last_report_time = 0;
-    uint32_t current_time = board_millis();
-
-    if (current_time - last_report_time < REPORT_INTERVAL_MS) return;
-    last_report_time = current_time; // send now
-
-    struct InputPacket packet;
-    A_buttonSpam(&packet);
-    global_counter += 1;
-
-    tud_hid_report(0, &packet, PACKET_LEN);
 }
 
+void fill_input_packet(inputPacket* packet) {
+    // takes controller input and fills packet accordingly.
+    // for now, just spam A.
+
+    memset(packet, 0, sizeof(inputPacket));
+
+    packet->timer = global_counter++;
+    packet->battery_con = get_battery_con();
+    
+    packet->button_status[0] = 0x08;
+
+    set_left_stick_status(&(*packet->left_stick));
+    set_right_stick_status(&(*packet->right_stick));
+
+    packet->vibrator_byte = 0x80; // constant
+}
 
 // host asks about report state - switch never calls this
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
@@ -133,201 +276,54 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
 
 // host trying to set device state
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
-                            hid_report_type_t report_type, uint8_t const* buffer,
-                            uint16_t bufsize) 
+                            hid_report_type_t report_type,
+                            uint8_t const* buffer, uint16_t bufsize) 
 {
-    if (report_type ==  HID_REPORT_TYPE_OUTPUT) {
-        // can clear it, since switch only sends next SR after last one
-        // got a response.
+    if (report_type != HID_REPORT_TYPE_OUTPUT) return;
+    memset(&sr_response, 0, sizeof(sr_response));
 
-        memset(&pendingResponse, 0, PACKET_LEN);
-        switch(buffer[0]) { 
-
-            // ---------- HANDSHAKE PHASE ------------
-            case 0x80:
-
-                pendingResponse[0] = 0x81;
-
-                switch(buffer[1]) {
-                    case 0x01:
-                        pendingResponse[1] = 0x01;
-                        // pendingResponse[2] = 0x00;
-                        pendingResponse[3] = 0x03;
-                        
-                        // little endian mac address
-                        pendingResponse[4] = 0x33;
-                        pendingResponse[5] = 0x22;
-                        pendingResponse[6] = 0x11;
-                        pendingResponse[7] = 0x8A;
-                        pendingResponse[8] = 0xBB;
-                        pendingResponse[9] = 0x7C;
-
-                        tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        break;
-                    
-                    case 0x02:
-                        pendingResponse[1] = 0x02;
-
-                        tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        break;
-                    
-                    case 0x03:
-                        pendingResponse[1] = 0x03;
-
-                        tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        break;
-                    
-                    case 0x04:
-                    
-                        global_state = CONTROLLER_STATE_SUBCOMMAND_INIT;
-                        break;
-                }
-                break;
-            // -----------------------------------------
-            
-            case 0x01:
-
-                pendingResponse[0] = 0x21;
-                pendingResponse[1] = global_counter;
-                pendingResponse[2] = 0x91; // batter + conn
-
-                pendingResponse[7] = 0x08; // neutral stick
-                pendingResponse[8] = 0x80;
-
-                pendingResponse[10] = 0x08; // newutral stick
-                pendingResponse[11] = 0x80;
-                pendingResponse[12] = 0x80; // vibrator ack (standard)
-
-                pendingResponse[13] = 0x80 | buffer[10]; // 0x80 | subcommand
-                pendingResponse[14] = buffer[10]; // subcommand
-
-
-                switch(buffer[10]) {
-                    // ---------- SUBCMD INIT PHASE ------------
-                    case 0x02:
-
-                        pendingResponse[15] = 0x03; // firmware (standard)
-                        pendingResponse[16] = 0x48;
-
-                        pendingResponse[17] = 0x03; // device type (standard)
-                        pendingResponse[18] = 0x02;
-
-                        // mac address little endian
-                        pendingResponse[19] = 0x7C;
-                        pendingResponse[20] = 0xBB;
-                        pendingResponse[21] = 0x8A;
-                        pendingResponse[22] = 0x11;
-                        pendingResponse[23] = 0x22;
-                        pendingResponse[24] = 0x33;
-
-                        pendingResponse[25] = 0x01; // color and factory loc
-                        pendingResponse[26] = 0x01; // (standard)
-
-                        tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        break;
-                    
-                    case 0x08:
-                        // TODO: TURN ON LOW POWER STATE
-
-                        tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        break;
-                    
-                    // -------------------------------------------------------
-
-                    // ---------- PARSE EVEN DURING INPUT STREAM MODE ---------
-
-                    case 0x10:
-                        // addr given in msg
-                        pendingResponse[15] = buffer[11];
-                        pendingResponse[16] = buffer[12];
-                        pendingResponse[17] = buffer[13];
-                        pendingResponse[18] = buffer[14];
-
-                        uint32_t fullAddr = (buffer[14] << 24) | 
-                        (buffer[13] << 16) | (buffer[12] << 8) | buffer[11];
-
-                        pendingResponse[19] = buffer[15]; // read len from msg
-                        spi_flash_read(
-                            fullAddr, 
-                            buffer[15], 
-                            &pendingResponse[20]
-                        );
-
-                        if (global_state == CONTROLLER_STATE_SUBCOMMAND_INIT) {
-                            tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        } else {
-                            srResponsePending = true;
-                        }
-
-                        // queue the packet if in input stream mode
-                        // otherwise send immediately
-                        break;
-
-                    case 0x40:
-                        // TODO: TURN ON INTERNAL GYRO/ACCELEROMETER
-
-                        // queue the packet if in input stream mode
-                        // otherwise send immediately
-
-                        if (global_state == CONTROLLER_STATE_SUBCOMMAND_INIT) {
-                            tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        } else {
-                            srResponsePending = true;
-                        }
-
-                        break;
-                    
-                    case 0x48:
-                        // TODO: ENABLE VIBRATION
-
-                        // queue the packet if in input stream mode
-                        // otherwise send immediately
-
-                        if (global_state == CONTROLLER_STATE_SUBCOMMAND_INIT) {
-                            tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        } else {
-                            srResponsePending = true;
-                        }
-
-                        break;
-
-                    case 0x03:
-
-                        // queue the packet if in input stream mode
-                        // otherwise send immediately
-
-                        // tud_hid_report(0, &pendingResponse, PACKET_LEN);
-                        global_state = CONTROLLER_STATE_STREAM_INPUT;
-                        break;
-
-                    case 0x00:
-                        // TODO: TRIGGER VIBRATION (RUMBLE)
-                        // NO RESPONSE SENT/QUEUED
-                        break;
-                    
-                    case 0x30:
-                        // TODO: SET PLAYER LED
-                        break;
-
-                    case 0x38:
-                        // TODO: Set HOME Button LED
-                        break;
-                    
-                    case 0x04:
-                        // TODO: Trigger Elapsed Time
-                        break;
-                    
-                }
+    switch(buffer[0]) {
+        case 0x80:
+            handle_handshake(buffer);
             break;
-        }
-            
+        
+        case 0x01:
+        case 0x10:
+            handle_rumble(buffer, buffer[0]);
+            break;
+        
+        default:
+            break;
     }
+}
+
+void hid_task(void) {
+    if (!tud_hid_ready()) return; // line ready to accept new input
+
+    if (sr_pending) { // prioritize subcommand responses
+        tud_hid_report(SUBCMD_RID, &sr_response, sizeof(sr_response));
+        sr_pending = false;
+        return;
+    }
+
+    if (global_state != CONTROLLER_STATE_STREAM_INPUT) return; 
+
+    static uint32_t last_report_time = 0;
+    uint32_t current_time = to_ms_since_boot(get_absolute_time());
+
+    if (current_time - last_report_time < REPORT_INTERVAL_MS) return;
+    last_report_time = current_time; // send now
+
+    inputPacket packet;
+    fill_input_packet(&packet);
+
+    tud_hid_report(INPUT_RID, &packet, sizeof(packet));
 }
 
 int main(void)
 {
-    state = HANDSHAKE;
-    board_init();
+    //board_init();
+    stdio_init_all();
     tusb_init();
 
     while(1) {

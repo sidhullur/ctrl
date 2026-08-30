@@ -23,7 +23,7 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
-set(PICO_BOARD pico2_w CACHE STRING "Board type")
+set(PICO_BOARD pico2_w)
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -41,14 +41,14 @@ pico_set_program_name(ctrl "ctrl")
 pico_set_program_version(ctrl "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(ctrl 1)
-pico_enable_stdio_usb(ctrl 1)
+pico_enable_stdio_uart(ctrl 0)
+pico_enable_stdio_usb(ctrl 0)
 
 # Add the standard library to the build
-target_link_libraries(ctrl
+target_link_libraries(ctrl PRIVATE
         pico_stdlib
         tinyusb_device
-        tinyusb_board)
+    )
 
 # Add the standard include files to the build
 target_include_directories(ctrl PRIVATE
