@@ -15,6 +15,7 @@ static bool sr_pending = false;
 static uint8_t sr_response[63]; // first byte is report ID
 typedef enum {
     CONTROLLER_STATE_HANDSHAKE,
+    CONTROLLER_STATE_SUBCMD_INIT,
     CONTROLLER_STATE_STREAM_INPUT
 } ControllerState;
 
@@ -65,30 +66,35 @@ void handle_handshake(const uint8_t* buffer) {
             sr_response[7] = mac_addr[1];
             sr_response[8] = mac_addr[0];
 
+            sr_pending = true;
             break;
         
         case 0x04:
 
-            global_state = CONTROLLER_STATE_STREAM_INPUT;
+            global_state = CONTROLLER_STATE_SUBCMD_INIT;
+            sr_response[0] = 0;
             break;
         
         case 0x05:
 
             global_state = CONTROLLER_STATE_HANDSHAKE;
+            sr_response[0] = 0;
             break;
         
         // just ack
         case 0x02:
         case 0x03:
-        case 0x06:
+            sr_pending = true;
             break;
+
+        // case 0x06:
+        //     break;
         
         default: // 91/92 ignored
             break;
     }
 
     // tud_hid_report(HANDSHAKE_RESPONSE_RID, &sr_response, sizeof(sr_response));
-    sr_pending = true;
 }
 
 void toggle_imu(const uint8_t choice) {
@@ -139,6 +145,7 @@ void fill_subcommand_response_payload(
             //         global_input_mode = INPUT_MODE_HID;
             //         break;
             // }
+            global_state = CONTROLLER_STATE_STREAM_INPUT;
             break;
         
         case 0x10:
@@ -288,7 +295,8 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             uint8_t const* buffer, uint16_t bufsize) 
 {
     if (report_type != HID_REPORT_TYPE_OUTPUT) return;
-    memset(&sr_response, 0, sizeof(sr_response));
+    if (!sr_pending)
+        memset(&sr_response, 0, sizeof(sr_response));
 
     switch(buffer[0]) {
         case 0x80:
