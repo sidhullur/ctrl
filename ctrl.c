@@ -11,7 +11,6 @@
 #define HANDSHAKE_RESPONSE_RID 0x81
 #define SPI_READ_MAX_LEN 0x1D // protocol cap on bytes per SPI flash read
 
-static FILE* log;
 static bool sr_pending = false;
 static uint8_t sr_response[63]; // first byte is report ID
 static uint8_t pending_rid = 0;
@@ -289,12 +288,12 @@ void fill_input_packet(inputPacket* packet) {
     packet->vibrator_byte = 0x80; // constant
 }
 
-void append_packet_log(uint8_t* buffer, uint16_t bufsize, char* source) {
-    fprintf(log, "%s: ", source);
+void append_packet_log(const uint8_t* buffer, const uint16_t bufsize, const char* source) {
+    printf("%s: ", source);
     for (int i = 0; i < bufsize; i++) {
-        fprintf(log, "%02X ", buffer[i]);
+        printf("%02X ", buffer[i]);
     }
-    fprintf(log, "\n");
+    printf("\n");
 }
 
 // host asks about report state - switch never calls this
@@ -342,10 +341,7 @@ void hid_task(void) {
         return;
     }
 
-    if (global_state == CONTROLLER_STATE_STREAM_INPUT) {
-        fclose(log);
-        return;
-    }
+    return;
 
     if (global_state != CONTROLLER_STATE_STREAM_INPUT) return; 
 
@@ -366,8 +362,6 @@ int main(void)
     //board_init();
     stdio_init_all();
     tusb_init();
-
-    log = fopen("log.txt", "w");
 
     while(1) {
         tud_task(); // tinyUSB method for processing USB events
