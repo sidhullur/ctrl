@@ -40,25 +40,22 @@ add_executable(ctrl ctrl.c usb_descriptors.c)
 pico_set_program_name(ctrl "ctrl")
 pico_set_program_version(ctrl "0.1")
 
-# Modify the below lines to enable/disable output over UART/USB
+# stdio: route to UART only. USB is the gamepad, so USB-CDC stdio MUST be
+# off or it fights the HID device.
 pico_enable_stdio_uart(ctrl 1)
 pico_enable_stdio_usb(ctrl 0)
 
-# Add the standard library to the build
+# Add the standard library + TinyUSB device stack to the build.
+# Linking tinyusb_device is what makes pico-sdk inject CFG_TUSB_MCU /
+# CFG_TUSB_OS as compile definitions.
 target_link_libraries(ctrl PRIVATE
         pico_stdlib
         tinyusb_device
     )
 
-# Add the standard include files to the build
+# Pick up tusb_config.h / usb_descriptors.c from the project root
 target_include_directories(ctrl PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
-# Add any user requested libraries
-target_link_libraries(ctrl 
-        
-        )
-
 pico_add_extra_outputs(ctrl)
-
