@@ -61,18 +61,18 @@ void handle_handshake(const uint8_t* buffer) {
         case 0x01:
             sr_response[2] = 0x03;
 
-            sr_response[3] = mac_addr[5];
-            sr_response[4] = mac_addr[4];
-            sr_response[5] = mac_addr[3];
-            sr_response[6] = mac_addr[2];
-            sr_response[7] = mac_addr[1];
-            sr_response[8] = mac_addr[0];
-            // sr_response[3] = mac_addr[0];
-            // sr_response[4] = mac_addr[1];
-            // sr_response[5] = mac_addr[2];
-            // sr_response[6] = mac_addr[3];
-            // sr_response[7] = mac_addr[4];
-            // sr_response[8] = mac_addr[5];
+            // sr_response[3] = mac_addr[5];
+            // sr_response[4] = mac_addr[4];
+            // sr_response[5] = mac_addr[3];
+            // sr_response[6] = mac_addr[2];
+            // sr_response[7] = mac_addr[1];
+            // sr_response[8] = mac_addr[0];
+            sr_response[3] = mac_addr[0];
+            sr_response[4] = mac_addr[1];
+            sr_response[5] = mac_addr[2];
+            sr_response[6] = mac_addr[3];
+            sr_response[7] = mac_addr[4];
+            sr_response[8] = mac_addr[5];
 
             sr_pending = true;
             break;
@@ -80,13 +80,13 @@ void handle_handshake(const uint8_t* buffer) {
         case 0x04:
 
             global_state = CONTROLLER_STATE_SUBCMD_INIT;
-            sr_pending = true;
+            sr_response[0] = 0;
             break;
         
         case 0x05:
 
             global_state = CONTROLLER_STATE_HANDSHAKE;
-            sr_pending = true;
+            sr_response[0] = 0;
             break;
         
         // just ack
@@ -116,7 +116,6 @@ void toggle_vibration(const uint8_t choice) {
 
 void fill_subcommand_response_payload(
     uint8_t* ackSlot, uint8_t* payload_buffer, const uint8_t* input_packet) {
-    // srPending set to true immediately after this is called.
 
     *ackSlot = 0x80;
 
@@ -144,15 +143,6 @@ void fill_subcommand_response_payload(
             break;
         
         case 0x03:
-            // switch(input_packet[11]) { // input type
-            //     case 0x30:
-            //         global_input_mode = INPUT_MODE_STANDARD;
-            //         break;
-                
-            //     case 0x3F:
-            //         global_input_mode = INPUT_MODE_HID;
-            //         break;
-            // }
             if (input_packet[11] == 0x30) {
                 global_state = CONTROLLER_STATE_STREAM_INPUT;
             }
@@ -233,7 +223,8 @@ uint8_t get_battery_con() {
 
 void set_button_status(uint8_t* buffer) {
     // TODO: sets three bytes from controller
-    buffer[0] = 0x08; // A button pressed
+    // buffer[0] = 0x08; // A button pressed
+    buffer[0] = 0x00;
     buffer[1] = 0x00;
     buffer[2] = 0x00;
 }
@@ -274,6 +265,7 @@ void handle_rumble(const uint8_t* input_packet, uint8_t report_type) {
 
             fill_subcommand_response_payload(
                 &sr_response[12], &sr_response[14], input_packet);
+
             sr_pending = true;
             break;
     }
@@ -306,13 +298,12 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             hid_report_type_t report_type,
                             uint8_t const* buffer, uint16_t bufsize) 
 {
-    //if (report_type != HID_REPORT_TYPE_OUTPUT) return;
-    if (report_type != HID_REPORT_TYPE_OUTPUT && 
-        report_type != HID_REPORT_TYPE_INVALID) return;
-
-    if (!sr_pending)
-        memset(&sr_response, 0, sizeof(sr_response));
-
+    // if (report_type != HID_REPORT_TYPE_OUTPUT) return;
+    // // if (report_type != HID_REPORT_TYPE_OUTPUT && 
+    // //     report_type != HID_REPORT_TYPE_INVALID) return;
+    memset(&sr_response, 0, sizeof(sr_response));
+    
+    if (bufsize < 1) return;
     switch(buffer[0]) {
         case 0x80:
             handle_handshake(buffer);
@@ -336,6 +327,8 @@ void hid_task(void) {
         sr_pending = false;
         return;
     }
+
+    return; // TODO: REMOVE LATER
 
     if (global_state != CONTROLLER_STATE_STREAM_INPUT) return; 
 
