@@ -11,6 +11,7 @@
 #define HANDSHAKE_RESPONSE_RID 0x81
 #define SPI_READ_MAX_LEN 0x1D // protocol cap on bytes per SPI flash read
 
+static FILE* log;
 static bool sr_pending = false;
 static uint8_t sr_response[63]; // first byte is report ID
 static uint8_t pending_rid = 0;
@@ -102,7 +103,7 @@ void handle_handshake(const uint8_t* buffer) {
             break;
     }
 
-    // tud_hid_report(HANDSHAKE_RESPONSE_RID, &sr_response, sizeof(sr_response));
+    // tud_hid_report(HANDSHAKE_RESPONSE_RID, sr_response, sizeof(sr_response));
 }
 
 void toggle_imu(const uint8_t choice) {
@@ -288,6 +289,14 @@ void fill_input_packet(inputPacket* packet) {
     packet->vibrator_byte = 0x80; // constant
 }
 
+void append_packet_log(uint8_t* buffer, uint16_t bufsize, char* source) {
+    fprintf(log, "%s: ", source);
+    for (int i = 0; i < bufsize; i++) {
+        fprintf(log, "%02X ", buffer[i]);
+    }
+    fprintf(log, "\n");
+}
+
 // host asks about report state - switch never calls this
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
                                 hid_report_type_t report_type, uint8_t* buffer,
@@ -301,7 +310,10 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     // if (report_type != HID_REPORT_TYPE_OUTPUT) return;
     // // if (report_type != HID_REPORT_TYPE_OUTPUT && 
     // //     report_type != HID_REPORT_TYPE_INVALID) return;
-    memset(&sr_response, 0, sizeof(sr_response));
+
+    append_packet_log(buffer, bufsize, "CONSOLE");
+
+    memset(sr_response, 0, sizeof(sr_response));
     
     if (bufsize < 1) return;
     switch(buffer[0]) {
@@ -322,13 +334,18 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 void hid_task(void) {
     if (!tud_hid_ready()) return; // line ready to accept new input
 
+    append_packet_log(sr_response, 63, "CONSOLE");
+
     if (sr_pending) { // prioritize subcommand responses
-        tud_hid_report(pending_rid, &sr_response, sizeof(sr_response));
+        tud_hid_report(pending_rid, sr_response, sizeof(sr_response));
         sr_pending = false;
         return;
     }
 
-    return; // TODO: REMOVE LATER
+    if (global_state == CONTROLLER_STATE_STREAM_INPUT) {
+        fclose(log);
+        return;
+    }
 
     if (global_state != CONTROLLER_STATE_STREAM_INPUT) return; 
 
@@ -349,6 +366,8 @@ int main(void)
     //board_init();
     stdio_init_all();
     tusb_init();
+
+    log = fopen("log.txt", "w");
 
     while(1) {
         tud_task(); // tinyUSB method for processing USB events
