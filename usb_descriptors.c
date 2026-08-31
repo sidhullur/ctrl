@@ -150,7 +150,8 @@ char const *string_desc_arr[] =
     (const char[]) { 0x09, 0x04 }, // 0: English (US), langid 0x0409
     "Nintendo Co., Ltd.",          // 1: iManufacturer
     "Pro Controller",              // 2: iProduct
-    "000000000001",                // 3: iSerialNumber (matches real captures)
+    //"000000000001",                // 3: iSerialNumber (matches real captures)
+    "7CBB8A081211"
 };
 
 static uint16_t _desc_str[32];

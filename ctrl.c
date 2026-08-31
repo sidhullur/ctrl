@@ -13,6 +13,7 @@
 
 static bool sr_pending = false;
 static uint8_t sr_response[63]; // first byte is report ID
+static uint8_t pending_rid = 0;
 typedef enum {
     CONTROLLER_STATE_HANDSHAKE,
     CONTROLLER_STATE_SUBCMD_INIT,
@@ -52,6 +53,7 @@ void set_controller_LEDs(const uint8_t* led_data) {
 
 void handle_handshake(const uint8_t* buffer) {
     // CONTROLLER_STATE_HANDSHAKE - send immediately, don't queue
+    pending_rid = HANDSHAKE_RESPONSE_RID;
     sr_response[0] = buffer[1];
 
     // skipped assignments are already 0x00
@@ -65,6 +67,12 @@ void handle_handshake(const uint8_t* buffer) {
             sr_response[6] = mac_addr[2];
             sr_response[7] = mac_addr[1];
             sr_response[8] = mac_addr[0];
+            // sr_response[3] = mac_addr[0];
+            // sr_response[4] = mac_addr[1];
+            // sr_response[5] = mac_addr[2];
+            // sr_response[6] = mac_addr[3];
+            // sr_response[7] = mac_addr[4];
+            // sr_response[8] = mac_addr[5];
 
             sr_pending = true;
             break;
@@ -72,13 +80,13 @@ void handle_handshake(const uint8_t* buffer) {
         case 0x04:
 
             global_state = CONTROLLER_STATE_SUBCMD_INIT;
-            sr_response[0] = 0;
+            sr_pending = true;
             break;
         
         case 0x05:
 
             global_state = CONTROLLER_STATE_HANDSHAKE;
-            sr_response[0] = 0;
+            sr_pending = true;
             break;
         
         // just ack
@@ -145,7 +153,9 @@ void fill_subcommand_response_payload(
             //         global_input_mode = INPUT_MODE_HID;
             //         break;
             // }
-            global_state = CONTROLLER_STATE_STREAM_INPUT;
+            if (input_packet[11] == 0x30) {
+                global_state = CONTROLLER_STATE_STREAM_INPUT;
+            }
             break;
         
         case 0x10:
@@ -249,6 +259,8 @@ void handle_rumble(const uint8_t* input_packet, uint8_t report_type) {
             break;
 
         case 0x01:
+            pending_rid = SUBCMD_RID;
+
             sr_response[0] = global_counter++;
             sr_response[1] = get_battery_con(); // SET BATTERY CON;
 
@@ -320,11 +332,7 @@ void hid_task(void) {
     if (!tud_hid_ready()) return; // line ready to accept new input
 
     if (sr_pending) { // prioritize subcommand responses
-        
-        uint8_t rid = (global_state == CONTROLLER_STATE_HANDSHAKE) ? 
-            HANDSHAKE_RESPONSE_RID : SUBCMD_RID;
-    
-        tud_hid_report(rid, &sr_response, sizeof(sr_response));
+        tud_hid_report(pending_rid, &sr_response, sizeof(sr_response));
         sr_pending = false;
         return;
     }
