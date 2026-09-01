@@ -51,7 +51,7 @@ extern "C" {
 #endif
 
 #ifndef CFG_TUSB_OS
-#define CFG_TUSB_OS           OPT_OS_PICO
+#define CFG_TUSB_OS           OPT_OS_NONE
 #endif
 
 #ifndef CFG_TUSB_DEBUG
@@ -81,16 +81,21 @@ extern "C" {
 //------------- CLASS -------------//
 // Only HID: the HORIPAD exposes exactly one interface (bNumInterfaces = 1).
 #define CFG_TUD_HID     1
-#define CFG_TUD_CDC     0
+#define CFG_TUD_CDC     1
 #define CFG_TUD_MSC     0
 #define CFG_TUD_MIDI    0
 #define CFG_TUD_VENDOR  0
+#define CFG_TUD_XINPUT  1 // xbox support
 
 // Must be >= the largest HID report. The input report is 8 bytes; 64 is
 // kept to match the real device's endpoint size and leave headroom for
 // the ignored rumble OUT report. Must match the endpoint size passed to
 // TUD_HID_INOUT_DESCRIPTOR() in usb_descriptors.c.
 #define CFG_TUD_HID_EP_BUFSIZE  64
+#define CFG_TUD_CDC_EP_BUFSIZE 64
+
+#define CFG_TUD_CDC_TX_BUFSIZE  256 // transmit ring
+#define CFG_TUD_CDC_RX_BUFSIZE  256 // receive ring
 
 #ifdef __cplusplus
 }

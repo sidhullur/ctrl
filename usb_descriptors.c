@@ -1,32 +1,39 @@
 /*
  * usb_descriptors.c
  *
- * TinyUSB device / configuration / HID-report / string descriptors for a
- * device that enumerates as a HORI Pokken Tournament DX Pro Pad
- * (VID 0x0F0D / PID 0x00C1) -- a Nintendo-licensed wired USB controller
- * on the Switch's accepted-controller whitelist.
+ * TinyUSB descriptors for a device that enumerates as a HORI Pokken
+ * Tournament DX Pro Pad (VID 0x0F0D / PID 0x0092) -- a Nintendo-licensed
+ * wired USB controller on the Switch's accepted-controller whitelist.
  *
- * This profile needs NO 0x80 handshake, NO 0x01/0x21 subcommand exchange,
- * NO SPI-flash emulation and NO crypto. The console reads this descriptor
- * set and then just polls the interrupt IN endpoint; your job elsewhere
- * is to keep a fresh 8-byte input report queued via tud_hid_report(0, ...).
+ * Matched to OGX-Mini's verified SwitchWired.h
+ * (Firmware/RP2040/src/Descriptors/SwitchWired.h), reported working on
+ * real Switch hardware. The Switch fingerprints more than VID/PID, and a
+ * PC will accept almost anything -- so copy a known-good pad exactly.
  *
- * Tradeoffs vs. full Pro Controller emulation: no rumble, no gyro/motion,
- * no amiibo/NFC, no analog triggers (ZL/ZR are digital). HOME and Capture
- * buttons DO work.
+ * Reference values:
+ *   device:  bcdUSB 0x0200, class 0/0/0, bMaxPacketSize0 64,
+ *            VID 0x0F0D, PID 0x0092, bcdDevice 0x0100, no serial string
+ *   config:  wTotalLength 34, 1 interface, bmAttributes 0xA0
+ *            (remote wakeup), MaxPower 500 mA (0xFA)
+ *   iface:   HID class 3, sub 0, proto 0, bNumEndpoints 1
+ *   HID:     bcdHID 0x0111, country 0, report descriptor length 86 (0x56)
+ *   EP IN:   0x81 interrupt / 64 / bInterval 1   (NO OUT endpoint)
+ *
+ * This profile needs NO handshake, NO subcommands, NO SPI-flash emulation
+ * and NO crypto. Keep a fresh 8-byte input report queued via
+ * tud_hid_report(0, ...). Tradeoffs: no rumble, no gyro/motion, no
+ * amiibo/NFC, no analog triggers (ZL/ZR are digital). HOME/Capture work.
  *
  * Requires in tusb_config.h:
  *   #define CFG_TUD_HID              1
  *   #define CFG_TUD_HID_EP_BUFSIZE   64   (must be >= 8)
- * and a HID class build with TUD_HID_INOUT_DESCRIPTOR available (same
- * pattern as TinyUSB's official "hid_generic_inout" example).
  */
 
 #include <string.h>
 #include "tusb.h"
 
 #define USB_VID   0x0F0D   // HORI CO., LTD.
-#define USB_PID   0x00C1   // Pokken Tournament DX Pro Pad
+#define USB_PID   0x0092   // Pokken Tournament DX Pro Pad
 
 //--------------------------------------------------------------------+
 // Device Descriptor
@@ -45,11 +52,11 @@ tusb_desc_device_t const desc_device =
 
     .idVendor           = USB_VID,
     .idProduct          = USB_PID,
-    .bcdDevice          = 0x0572,
+    .bcdDevice          = 0x0100,   // GP2040-CE / real Pokken pad
 
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
-    .iSerialNumber      = 0x00,   // real Pokken pad reports no serial
+    .iSerialNumber      = 0x00,     // no serial string (matches real device)
 
     .bNumConfigurations = 0x01
 };
@@ -61,10 +68,15 @@ uint8_t const * tud_descriptor_device_cb(void)
 }
 
 //--------------------------------------------------------------------+
-// HID Report Descriptor  (HORIPAD / Pokken pad)
+// HID Report Descriptor
 //
-// Layout of the 8-byte INPUT report this describes:
-//   byte 0..1  16 buttons (bit0 = Y, see main.c for the full map)
+// EXACT copy of GP2040-CE's switch_report_descriptor (86 bytes / 0x56).
+// Do not "tidy" it -- the compressed form (relying on Report Size / Usage
+// Page state carrying across items) is what the real pad sends, and the
+// Switch is believed to hash/length-check this blob.
+//
+// Layout of the 8-byte INPUT report it describes:
+//   byte 0..1  16 buttons (bit0 = Y; full map in ctrl.c)
 //   byte 2     low nibble = D-pad hat (0..7 dir, 8 = neutral); high nibble pad
 //   byte 3     left  stick X   (0x00..0xFF, 0x80 = center)
 //   byte 4     left  stick Y
@@ -78,7 +90,6 @@ uint8_t const desc_hid_report[] =
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x05,        // Usage (Game Pad)
     0xA1, 0x01,        // Collection (Application)
-    // ---- 16 buttons -> bytes 0..1 ----
     0x15, 0x00,        //   Logical Minimum (0)
     0x25, 0x01,        //   Logical Maximum (1)
     0x35, 0x00,        //   Physical Minimum (0)
@@ -88,41 +99,34 @@ uint8_t const desc_hid_report[] =
     0x05, 0x09,        //   Usage Page (Button)
     0x19, 0x01,        //   Usage Minimum (Button 1)
     0x29, 0x10,        //   Usage Maximum (Button 16)
-    0x81, 0x02,        //   Input (Data,Var,Abs)
-    // ---- hat switch (4 bits) + 4 bits padding -> byte 2 ----
+    0x81, 0x02,        //   Input (Data,Var,Abs)      -> bytes 0..1 (16 buttons)
     0x05, 0x01,        //   Usage Page (Generic Desktop)
     0x25, 0x07,        //   Logical Maximum (7)
     0x46, 0x3B, 0x01,  //   Physical Maximum (315)
     0x75, 0x04,        //   Report Size (4)
     0x95, 0x01,        //   Report Count (1)
-    0x65, 0x14,        //   Unit (Eng Rot: Degree)
+    0x65, 0x14,        //   Unit (Degrees)
     0x09, 0x39,        //   Usage (Hat switch)
-    0x81, 0x42,        //   Input (Data,Var,Abs,Null State)
+    0x81, 0x42,        //   Input (Data,Var,Abs,Null) -> byte 2 low nibble (hat)
     0x65, 0x00,        //   Unit (None)
     0x95, 0x01,        //   Report Count (1)
-    0x75, 0x04,        //   Report Size (4)
-    0x81, 0x01,        //   Input (Const) -> padding
-    // ---- 4 analog axes -> bytes 3..6 ----
-    0x05, 0x01,        //   Usage Page (Generic Desktop)
-    0x09, 0x30,        //   Usage (X)   -> Left  stick X
-    0x09, 0x31,        //   Usage (Y)   -> Left  stick Y
-    0x09, 0x32,        //   Usage (Z)   -> Right stick X
-    0x09, 0x35,        //   Usage (Rz)  -> Right stick Y
-    0x15, 0x00,        //   Logical Minimum (0)
+    0x81, 0x01,        //   Input (Const)             -> byte 2 high nibble pad
     0x26, 0xFF, 0x00,  //   Logical Maximum (255)
+    0x46, 0xFF, 0x00,  //   Physical Maximum (255)
+    0x09, 0x30,        //   Usage (X)   left  stick X
+    0x09, 0x31,        //   Usage (Y)   left  stick Y
+    0x09, 0x32,        //   Usage (Z)   right stick X
+    0x09, 0x35,        //   Usage (Rz)  right stick Y
     0x75, 0x08,        //   Report Size (8)
     0x95, 0x04,        //   Report Count (4)
-    0x81, 0x02,        //   Input (Data,Var,Abs)
-    // ---- vendor byte -> byte 7 ----
+    0x81, 0x02,        //   Input (Data,Var,Abs)      -> bytes 3..6 (sticks)
     0x06, 0x00, 0xFF,  //   Usage Page (Vendor Defined 0xFF00)
     0x09, 0x20,        //   Usage (0x20)
     0x95, 0x01,        //   Report Count (1)
-    0x75, 0x08,        //   Report Size (8)
-    0x81, 0x02,        //   Input (Data,Var,Abs)
-    // ---- 8-byte output report (rumble; ignored) ----
+    0x81, 0x02,        //   Input (Data,Var,Abs)      -> byte 7 (vendor)
     0x0A, 0x21, 0x26,  //   Usage (0x2621)
     0x95, 0x08,        //   Report Count (8)
-    0x91, 0x02,        //   Output (Data,Var,Abs)
+    0x91, 0x02,        //   Output (Data,Var,Abs)     -> 8-byte rumble (ignored)
     0xC0               // End Collection
 };
 
@@ -135,6 +139,17 @@ uint8_t const * tud_hid_descriptor_report_cb(uint8_t itf)
 
 //--------------------------------------------------------------------+
 // Configuration Descriptor
+//
+// Built with the SAME TinyUSB macros and args as OGX-Mini's verified
+// SwitchWired.h:
+//   TUD_CONFIG_DESCRIPTOR(1, 1, 0, LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 500)
+//   TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(report), 0x81,
+//                      CFG_TUD_HID_EP_BUFSIZE, 1)
+//
+// Note vs. earlier attempts:
+//   * TUD_HID_DESCRIPTOR (not _INOUT) -> IN endpoint 0x81 ONLY, no OUT EP,
+//     interface bNumEndpoints = 1, total length 34.
+//   * bmAttributes = 0xA0 (remote wakeup set), NOT 0x80.
 //--------------------------------------------------------------------+
 enum
 {
@@ -142,27 +157,22 @@ enum
     ITF_NUM_TOTAL
 };
 
-// EP1 OUT (console -> controller, rumble) and EP1 IN (controller -> console)
-#define EPNUM_HID_OUT   0x01
 #define EPNUM_HID_IN    0x81
-#define HID_EP_SIZE     CFG_TUD_HID_EP_BUFSIZE
-#define HID_EP_INTERVAL 5     // ms between IN polls; tune 1..10
 
-#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_INOUT_DESC_LEN)
+#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
 
 uint8_t const desc_configuration[] =
 {
-    // Config: itf count, string index, total length, attribute, power (mA)
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
-                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 500),
+                          TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 500),
 
-    // Interface: number, string index, protocol, report descriptor len,
-    // OUT endpoint, IN endpoint, endpoint size, polling interval
-    TUD_HID_INOUT_DESCRIPTOR(ITF_NUM_HID, 0, HID_ITF_PROTOCOL_NONE,
-                              sizeof(desc_hid_report),
-                              EPNUM_HID_OUT, EPNUM_HID_IN,
-                              HID_EP_SIZE, HID_EP_INTERVAL)
+    TUD_HID_DESCRIPTOR(ITF_NUM_HID, 0, HID_ITF_PROTOCOL_NONE,
+                       sizeof(desc_hid_report), EPNUM_HID_IN,
+                       CFG_TUD_HID_EP_BUFSIZE, 1),
 };
+
+_Static_assert(sizeof(desc_configuration) == 34, "config descriptor must be 34 bytes (IN-only)");
+_Static_assert(sizeof(desc_hid_report) == 86, "report descriptor must be 86 bytes (wDescriptorLength)");
 
 // Invoked when GET CONFIGURATION DESCRIPTOR is received
 uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
@@ -178,7 +188,8 @@ char const *string_desc_arr[] =
 {
     (const char[]) { 0x09, 0x04 }, // 0: English (US), langid 0x0409
     "HORI CO.,LTD.",               // 1: iManufacturer
-    "POKKEN CONTROLLER",           // 2: iProduct
+    "POKKEN CONTROLLER",           // 2: iProduct  (PID 0x0092)
+    "1.0"
 };
 
 static uint16_t _desc_str[32];
