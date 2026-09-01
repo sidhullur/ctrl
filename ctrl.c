@@ -57,15 +57,26 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             uint8_t const* buffer, uint16_t bufsize) {}
 
 void fill_input_report(InputReport* report) {
-    memset(report, 0, sizeof(curr_report));
+    memset(report, 0, sizeof(*report));
 
-    report->button_b = 1;
-    report->d_pad_pos = N;
-    report->ls_x = 0xFF;
-    report-> ls_y = report->rs_x = report->rs_y = STICK_CENTER;
+    report->d_pad_pos = N;                                  // hat neutral
+    report->ls_x = report->ls_y = STICK_CENTER;
+    report->rs_x = report->rs_y = STICK_CENTER;
+
+    // The Switch assigns / fully acknowledges a controller on an input
+    // EDGE, not a held level. Sending the same non-neutral report forever
+    // gives it nothing to latch onto (and a pinned stick / stuck button
+    // can read as a faulty pad). So sit neutral and pulse A: 100 ms down,
+    // 900 ms up -> a clean 0->1->0 transition every second.
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if ((now % 1000u) < 100u) {
+        report->button_a = 1;
+    }
 }
 
 void hid_task(void) {
+    if (!tud_mounted()) return; 
+
     static uint32_t last_report = 0;
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
@@ -75,15 +86,18 @@ void hid_task(void) {
     last_report = now;
 
     fill_input_report(&curr_report);
+    if (tud_suspended()) tud_remote_wakeup();
     tud_hid_report(0, &curr_report, sizeof(curr_report));
 }
 
 int main(void)
 {
     stdio_init_all();
+
+    fill_input_report(&curr_report);   // valid report exists before first poll
     tusb_init();
 
-    while(1) {
+    while (1) {
         tud_task(); // tinyUSB method for processing USB events
         hid_task(); // user defined
     }
