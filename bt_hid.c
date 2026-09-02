@@ -3,11 +3,17 @@
 #include "btstack.h"
 #include "btstack_config.h"
 
-#define REMOTE_DEVICE_DESCRIPTOR_BUFSIZE 300
+// DualSense HID descriptor is ~273 bytes over USB and larger over BT; give
+// btstack room so the SDP fetch doesn't truncate/fail (we don't parse it, but
+// btstack still needs the fetch to complete before it delivers reports)
+#define REMOTE_DEVICE_DESCRIPTOR_BUFSIZE 512
 #define INQUIRY_DURATION 5
 #define MAX_DISCOVERED_DEVICES 20 // up to 20 in a singular scan
 
+#include "bt_hid_bridge.h"
+
 static uint8_t remote_descriptor_storage[REMOTE_DEVICE_DESCRIPTOR_BUFSIZE];
+InputReport curr_report;
 
 typedef enum {
     DEVICE_NAME_UNKNOWN,      // haven't asked for the name yet
@@ -26,12 +32,12 @@ typedef struct {
 typedef enum { APP_SCANNING, APP_CONNECTING, APP_CONNECTED } app_state_t;
 static app_state_t app_state = APP_SCANNING;
 
-static const char *target_name_substring = "DualSense Wireless Controller";
+static const char *target_name_substring = "DualSense";
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static device discovered_devices[MAX_DISCOVERED_DEVICES];
 static int num_devices_discovered = 0;
 static bool target_found = false;
-static uint16_t connection_id = 0;
+uint16_t connection_id = 0;
 static bool hid_descriptor_available = false;
 
 // additional helper method strcasestr() equivalent code.
@@ -54,6 +60,53 @@ static bool name_contains(const char *haystack, const char *needle) {
     return false;
 }
 
+// ---------------- LED STATUS --------------------------
+// AI-GENERATED
+// the on-board LED is our only observable output (no serial console), so it
+// doubles as a status readout, refreshed on a repeating btstack timer:
+//   scanning       -> slow blink   (~1 Hz)
+//   connecting     -> medium blink (~2.5 Hz)
+//   connected      -> solid on
+//   recent failure -> fast blink   (~5 Hz) for ~1.5 s, then the current state
+#define LED_TICK_MS 50
+#define LED_ERROR_TICKS (1500 / LED_TICK_MS)
+
+static btstack_timer_source_t led_timer;
+static uint32_t led_tick = 0;
+static uint32_t led_error_ticks_left = 0;
+
+// call from any failure path to flash the LED fast for a short window
+static void led_signal_error(void) {
+    led_error_ticks_left = LED_ERROR_TICKS;
+}
+
+static void led_timer_handler(btstack_timer_source_t *ts) {
+    led_tick++;
+
+    bool led_on;
+    if (led_error_ticks_left > 0) {
+        led_error_ticks_left--;
+        led_on = (led_tick & 1) == 0;       // ~5 Hz
+    } else if (app_state == APP_CONNECTED) {
+        led_on = true;                       // solid
+    } else if (app_state == APP_CONNECTING) {
+        led_on = (led_tick % 4) < 2;         // ~2.5 Hz
+    } else {
+        led_on = (led_tick % 20) < 10;       // ~1 Hz (scanning)
+    }
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_on);
+
+    // re-arm: btstack timers are one-shot
+    btstack_run_loop_set_timer(ts, LED_TICK_MS);
+    btstack_run_loop_add_timer(ts);
+}
+
+static void led_status_start(void) {
+    btstack_run_loop_set_timer_handler(&led_timer, led_timer_handler);
+    btstack_run_loop_set_timer(&led_timer, LED_TICK_MS);
+    btstack_run_loop_add_timer(&led_timer);
+}
+
 // ---------------- METHODS --------------------------
 static void connect(bd_addr_t target) {
     target_found = true;
@@ -65,6 +118,7 @@ static void connect(bd_addr_t target) {
     if (status != ERROR_CODE_SUCCESS) { // failed to connect
         target_found = false;
         app_state = APP_SCANNING;
+        led_signal_error();
     }
 }
 
@@ -103,7 +157,94 @@ void continue_discovery() {
 
 }
 
-static void handle_hid_report(const uint8_t *report, uint16_t report_len) {}
+// The DualSense HID report descriptor exposed over Bluetooth only maps the
+// stick axes as real HID usages; the buttons/hat/triggers live in a
+// vendor-defined blob, so btstack_hid_parser can't reach them. Every other
+// project (Linux hid-playstation, DS4Windows, ...) parses the DualSense by
+// fixed byte offsets instead -- so do we.
+//
+// Two input report layouts arrive over BT:
+//   id 0x01 : minimal    -> [id][LX][LY][RX][RY][btn0][btn1][btn2][L2][R2]
+//   id 0x31 : full/rich   -> [id][seq][LX][LY][RX][RY][L2][R2][seq#][btn0][btn1][btn2]...
+// The pad only starts sending 0x31 after the host reads feature report 0x05
+// (see HID_SUBEVENT_DESCRIPTOR_AVAILABLE below).
+//
+// btn0: bits 0-3 = hat (0-7 dir, 8 = neutral), 0x10 Square, 0x20 Cross,
+//       0x40 Circle, 0x80 Triangle
+// btn1: 0x01 L1, 0x02 R1, 0x04 L2, 0x08 R2, 0x10 Create, 0x20 Options,
+//       0x40 L3, 0x80 R3
+// btn2: 0x01 PS, 0x02 Touchpad click, 0x04 Mic
+
+// released-everything state (sticks centred, dpad neutral)
+static void curr_report_neutral(void) {
+    InputReport r;
+    memset(&r, 0, sizeof(r));
+    r.d_pad_pos = N;
+    r.ls_x = r.ls_y = 0x80;
+    r.rs_x = r.rs_y = 0x80;
+    curr_report = r;
+}
+
+static void parse_dualsense(uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry,
+                            uint8_t btn0, uint8_t btn1, uint8_t btn2) {
+    InputReport r;
+    memset(&r, 0, sizeof(r));
+
+    r.ls_x = lx;
+    r.ls_y = ly;
+    r.rs_x = rx;
+    r.rs_y = ry;
+
+    uint8_t hat = btn0 & 0x0f;
+    r.d_pad_pos = (hat <= UL) ? (DPad)hat : N;
+
+    r.button_y = (btn0 & 0x10) ? 1 : 0; // Square   -> Y
+    r.button_b = (btn0 & 0x20) ? 1 : 0; // Cross    -> B
+    r.button_a = (btn0 & 0x40) ? 1 : 0; // Circle   -> A
+    r.button_x = (btn0 & 0x80) ? 1 : 0; // Triangle -> X
+
+    r.button_l     = (btn1 & 0x01) ? 1 : 0; // L1
+    r.button_r     = (btn1 & 0x02) ? 1 : 0; // R1
+    r.button_zl    = (btn1 & 0x04) ? 1 : 0; // L2 click
+    r.button_zr    = (btn1 & 0x08) ? 1 : 0; // R2 click
+    r.button_minus = (btn1 & 0x10) ? 1 : 0; // Create -> -
+    r.button_plus  = (btn1 & 0x20) ? 1 : 0; // Options -> +
+    r.button_l3    = (btn1 & 0x40) ? 1 : 0;
+    r.button_r3    = (btn1 & 0x80) ? 1 : 0;
+
+    r.button_home    = (btn2 & 0x01) ? 1 : 0; // PS       -> Home
+    r.button_capture = (btn2 & 0x02) ? 1 : 0; // Touchpad -> Capture
+
+    // single struct assignment: narrows the window in which hid_task() (main
+    // loop) can read a half-updated report built in the btstack context
+    curr_report = r;
+}
+
+static void handle_hid_report(const uint8_t *report, uint16_t report_len) {
+    // BT interrupt-channel HID data is prefixed with 0xa1 (DATA | INPUT)
+    if (report_len < 1 || *report != 0xa1) return;
+    report++;
+    report_len--;
+
+    if (report_len < 1) return;
+    uint8_t report_id = report[0];
+
+    if (report_id == 0x31) {
+        // [0]=id [1]=seq/flags [2]=LX [3]=LY [4]=RX [5]=RY [6]=L2 [7]=R2
+        // [8]=seq# [9]=btn0 [10]=btn1 [11]=btn2
+        if (report_len < 12) return;
+        parse_dualsense(report[2], report[3], report[4], report[5],
+                        report[9], report[10], report[11]);
+    } else if (report_id == 0x01) {
+        // [0]=id [1]=LX [2]=LY [3]=RX [4]=RY [5]=btn0 [6]=btn1 [7]=btn2
+        if (report_len < 8) return;
+        parse_dualsense(report[1], report[2], report[3], report[4],
+                        report[5], report[6], report[7]);
+    }
+    // other report ids (0x02 touchpad-only, feature echoes, ...) are ignored
+}
+
+
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     (void) channel; (void) size; // unused params
@@ -135,6 +276,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             gap_event_inquiry_result_get_bd_addr(packet, curr_address);
             // fills in the array of bytes
 
+            
+            // uint32_t cod = gap_event_inquiry_result_get_class_of_device(packet);
+            // if ((cod & 0x1F00) != 0x0500) break; // only populate game pads
+
             if(get_device_index(curr_address) >= 0) break; // we stored this alr
             device* d_slot = &discovered_devices[num_devices_discovered++];
             memcpy(d_slot->addr, curr_address, 6);
@@ -150,6 +295,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 name_len = (name_len >= (int) sizeof(name_buffer)) ?
                     sizeof(name_buffer) - 1 : name_len;
                 // one bit reserved for a 0 
+
+                memcpy(name_buffer, gap_event_inquiry_result_get_name(packet), name_len);
                 name_buffer[name_len] = 0;
                 d_slot->name_state = DEVICE_NAME_KNOWN;
 
@@ -226,6 +373,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                         target_found = false;
                         app_state = APP_SCANNING;
                         num_devices_discovered = 0; // fill out array again
+                        led_signal_error();
                         gap_inquiry_start(INQUIRY_DURATION);
                         break;
                     }
@@ -238,24 +386,27 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 
                 case HID_SUBEVENT_DESCRIPTOR_AVAILABLE:
                     status = hid_subevent_descriptor_available_get_status(packet);
-                    if (status == ERROR_CODE_SUCCESS) {
-                        hid_descriptor_available = true;
-                        // tells our device how to interpret incoming packets
-                    }
+                    hid_descriptor_available = (status == ERROR_CODE_SUCCESS);
+
+                    // Kick the DualSense into "full" mode: once the host reads
+                    // feature report 0x05 (calibration), the pad switches from
+                    // the minimal 0x01 report to the rich 0x31 report that
+                    // carries every button. Harmless if it fails.
+                    hid_host_send_get_report(connection_id, HID_REPORT_TYPE_FEATURE, 0x05);
+                    break;
+
+                case HID_SUBEVENT_GET_REPORT_RESPONSE:
+                    // response to the feature-report request above; nothing to
+                    // do with the payload, the side effect is what we wanted
                     break;
 
                 case HID_SUBEVENT_REPORT:
-                    if (hid_descriptor_available) {
-                        handle_hid_report(
-                            hid_subevent_report_get_report(packet),
-                            hid_subevent_report_get_report_len(packet)
-                        );
-                    } else {
-                        // printf_hexdump(
-                        //     hid_subevent_report_get_report(packet),
-                        //     hid_subevent_report_get_report_len(packet)
-                        // );
-                    }
+                    // parsed by fixed byte offset, so the HID descriptor is not
+                    // required (the BT descriptor doesn't describe the buttons)
+                    handle_hid_report(
+                        hid_subevent_report_get_report(packet),
+                        hid_subevent_report_get_report_len(packet)
+                    );
                     break;
 
                 case HID_SUBEVENT_SET_PROTOCOL_RESPONSE:
@@ -266,11 +417,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 case HID_SUBEVENT_CONNECTION_CLOSED:
                     connection_id = 0;
                     hid_descriptor_available = false;
+                    curr_report_neutral(); // don't leave inputs stuck held
 
                     // rescan
                     target_found = false;
                     app_state = APP_SCANNING;
                     num_devices_discovered = 0;
+                    led_signal_error();
                     gap_inquiry_start(INQUIRY_DURATION);
                     break;
                 
@@ -328,8 +481,8 @@ int bt_hid_init(void) {
         return -1;
     }
 
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
     bt_host_setup();
+    led_status_start(); // LED now reflects app_state / errors
     hci_power_control(HCI_POWER_ON);
     return 0;
 }

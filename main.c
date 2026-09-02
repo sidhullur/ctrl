@@ -8,35 +8,12 @@
 #define REPORT_INTERVAL 5
 #define STICK_CENTER 0x80
 
-typedef enum {U, UR, R, DR, D, DL, L, UL, N} DPad;
-
-typedef struct __attribute__((packed)) {
-    unsigned int button_y : 1;
-    unsigned int button_b : 1;
-    unsigned int button_a : 1;
-    unsigned int button_x : 1;
-    unsigned int button_l : 1;
-    unsigned int button_r : 1;
-    unsigned int button_zl : 1;
-    unsigned int button_zr : 1;
-    unsigned int button_minus : 1;
-    unsigned int button_plus : 1;
-    unsigned int button_l3 : 1;
-    unsigned int button_r3 : 1;
-    unsigned int button_home : 1;
-    unsigned int button_capture : 1;
-    unsigned int padding : 2;
-
-    DPad d_pad_pos : 8;
-    
-    uint8_t ls_x, ls_y;
-    uint8_t rs_x, rs_y;
-
-    uint8_t vendor;
-} InputReport;
-_Static_assert(sizeof(InputReport) == 8, "InputReport must be 8 bytes");
-
-static InputReport curr_report;
+static void neutral_report(void) {
+    memset(&curr_report, 0, sizeof(curr_report));
+    curr_report.d_pad_pos = N;
+    curr_report.ls_x = curr_report.ls_y = STICK_CENTER;
+    curr_report.rs_x = curr_report.rs_y = STICK_CENTER;
+}
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
                                 hid_report_type_t report_type, uint8_t* buffer,
@@ -52,19 +29,6 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             hid_report_type_t report_type,
                             uint8_t const* buffer, uint16_t bufsize) {}
 
-void fill_input_report(InputReport* report) {
-    memset(report, 0, sizeof(*report));
-
-    report->d_pad_pos = N;
-    report->ls_x = report->ls_y = STICK_CENTER;
-    report->rs_x = report->rs_y = STICK_CENTER;
-
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if ((now % 1000u) < 100u) {
-        report->button_a = 1;
-    }
-}
-
 void hid_task(void) {
     if (!tud_mounted()) return; 
 
@@ -76,7 +40,7 @@ void hid_task(void) {
     
     last_report = now;
 
-    fill_input_report(&curr_report);
+    // fill_input_report(&curr_report);
     if (tud_suspended()) tud_remote_wakeup();
     tud_hid_report(0, &curr_report, sizeof(curr_report));
 }
@@ -85,7 +49,7 @@ int main(void)
 {
     stdio_init_all();
 
-    fill_input_report(&curr_report); 
+    neutral_report(); // sane state until the first BT report lands
 
     bt_hid_init();
     tusb_init();
