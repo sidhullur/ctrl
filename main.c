@@ -1,15 +1,15 @@
-//#include "bsp/board_api.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
 #include <stdint.h>
 #include <string.h>
 
+#include "bt_hid_bridge.h"
+
 #define REPORT_INTERVAL 5
 #define STICK_CENTER 0x80
 
-typedef enum {
-    U, UR, R, DR, D, DL, L, UL, N
-} DPad;
+typedef enum {U, UR, R, DR, D, DL, L, UL, N} DPad;
+
 typedef struct __attribute__((packed)) {
     unsigned int button_y : 1;
     unsigned int button_b : 1;
@@ -38,9 +38,6 @@ _Static_assert(sizeof(InputReport) == 8, "InputReport must be 8 bytes");
 
 static InputReport curr_report;
 
-// Some hosts (and possibly the Switch during setup) issue a control-pipe
-// GET_REPORT before they start polling the interrupt IN endpoint. Returning
-// 0 makes TinyUSB STALL it; answer with the current 8-byte report instead.
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
                                 hid_report_type_t report_type, uint8_t* buffer,
                                 uint16_t reqlen) {
@@ -51,7 +48,6 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
     return len;
 }
 
-// No OUT endpoint; console rumble (if any) would arrive here via EP0. Ignore.
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             hid_report_type_t report_type,
                             uint8_t const* buffer, uint16_t bufsize) {}
@@ -59,15 +55,10 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 void fill_input_report(InputReport* report) {
     memset(report, 0, sizeof(*report));
 
-    report->d_pad_pos = N;                                  // hat neutral
+    report->d_pad_pos = N;
     report->ls_x = report->ls_y = STICK_CENTER;
     report->rs_x = report->rs_y = STICK_CENTER;
 
-    // The Switch assigns / fully acknowledges a controller on an input
-    // EDGE, not a held level. Sending the same non-neutral report forever
-    // gives it nothing to latch onto (and a pinned stick / stuck button
-    // can read as a faulty pad). So sit neutral and pulse A: 100 ms down,
-    // 900 ms up -> a clean 0->1->0 transition every second.
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if ((now % 1000u) < 100u) {
         report->button_a = 1;
@@ -94,11 +85,13 @@ int main(void)
 {
     stdio_init_all();
 
-    fill_input_report(&curr_report);   // valid report exists before first poll
+    fill_input_report(&curr_report); 
+
+    bt_hid_init();
     tusb_init();
 
     while (1) {
-        tud_task(); // tinyUSB method for processing USB events
-        hid_task(); // user defined
+        tud_task();
+        hid_task();
     }
 }
