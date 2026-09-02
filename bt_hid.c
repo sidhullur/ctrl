@@ -31,6 +31,8 @@ static btstack_packet_callback_registration_t hci_event_callback_registration;
 static device discovered_devices[MAX_DISCOVERED_DEVICES];
 static int num_devices_discovered = 0;
 static bool target_found = false;
+static uint16_t connection_id = 0;
+static bool hid_descriptor_available = false;
 
 // additional helper method strcasestr() equivalent code.
 static bool name_contains(const char *haystack, const char *needle) {
@@ -53,14 +55,12 @@ static bool name_contains(const char *haystack, const char *needle) {
 }
 
 // ---------------- METHODS --------------------------
-static void connect(const bd_addr_t target) {
+static void connect(bd_addr_t target) {
     target_found = true;
     app_state = APP_CONNECTING;
     gap_inquiry_stop(); // stop scanning
 
-    uint8_t status = hid_host_connect(target, HID_PROTOCOL_MODE_REPORT, 0);
-    // connection id -> we only connect to one at a time, so no need to 
-    // make this explicit
+    uint8_t status = hid_host_connect(target, HID_PROTOCOL_MODE_REPORT, &connection_id);
 
     if (status != ERROR_CODE_SUCCESS) { // failed to connect
         target_found = false;
@@ -70,14 +70,13 @@ static void connect(const bd_addr_t target) {
 
 static bool request_next(void) {
     for (int i = 0; i < num_devices_discovered; i++) {
-        device curr_device = discovered_devices[i];
-        if (curr_device.name_state == DEVICE_NAME_UNKNOWN) {
+        if (discovered_devices[i].name_state == DEVICE_NAME_UNKNOWN) {
 
-            curr_device.name_state = DEVICE_NAME_REQUESTED;
+            discovered_devices[i].name_state = DEVICE_NAME_REQUESTED;
             gap_remote_name_request(
-                curr_device.addr,
-                curr_device.page_scan_repition_mode,
-                curr_device.clock_offset | 0x8000
+                discovered_devices[i].addr,
+                discovered_devices[i].page_scan_repition_mode,
+                discovered_devices[i].clock_offset | 0x8000
             );
             return true;
         }
@@ -86,20 +85,20 @@ static bool request_next(void) {
 }
 
 
-int seen_device(const bt_addr_t addr) { // pointer to first byte in struct
+int get_device_index(const bd_addr_t addr) { // pointer to first byte in struct
     for (int i = 0; i < num_devices_discovered; i++) {
         device curr_device = discovered_devices[i];
-        if (bd_addr_cmp(*addr, curr_device.addr)) return 1;
+        if (bd_addr_cmp(addr, curr_device.addr) == 0) return i;
     }
-    return 0;
+    return -1;
 }
 
-int continue_discovery() {
+void continue_discovery() {
     // if names to be requested, requests them
     // otherwise restarts device discovery
     if (request_next()) return;
     
-    device_count = 0;
+    num_devices_discovered = 0;
     gap_inquiry_start(INQUIRY_DURATION);
 
 }
@@ -111,7 +110,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     if (packet_type != HCI_EVENT_PACKET) return; // HCI connection
 
     uint8_t event_type = hci_event_packet_get_type(packet);
-
+    bd_addr_t event_address;
+    uint8_t status;
 
     switch(event_type) {
         case BTSTACK_EVENT_STATE:
@@ -131,11 +131,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             if (target_found || num_devices_discovered >= MAX_DISCOVERED_DEVICES) break;
 
             // get this device's addr; checking if we've alr seen it
-            bt_addr_t curr_address; // an array of bytes
+            bd_addr_t curr_address; // an array of bytes
             gap_event_inquiry_result_get_bd_addr(packet, curr_address);
             // fills in the array of bytes
 
-            if(seen_device(curr_address)) break;
+            if(get_device_index(curr_address) >= 0) break; // we stored this alr
             device* d_slot = &discovered_devices[num_devices_discovered++];
             memcpy(d_slot->addr, curr_address, 6);
             d_slot->page_scan_repition_mode = gap_event_inquiry_result_get_page_scan_repetition_mode(packet);
@@ -153,7 +153,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 name_buffer[name_len] = 0;
                 d_slot->name_state = DEVICE_NAME_KNOWN;
 
-                if (name_containers(name_buffer, target_name_substring))
+                if (name_contains(name_buffer, target_name_substring))
                     connect(curr_address);
             } else {
                 d_slot -> name_state = DEVICE_NAME_UNKNOWN;
@@ -163,7 +163,123 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
         case GAP_EVENT_INQUIRY_COMPLETE:
             // scan elapsed full duration
-            if (!target_found) continue_discovery;
+            if (!target_found) continue_discovery();
+            break;
+
+        case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE:
+            // response to our name request
+            if (target_found) break; // no need to act
+
+            bd_addr_t device_addr;
+            reverse_bd_addr(&packet[3], device_addr);
+
+            int idx = get_device_index(device_addr); // which slot?
+            uint8_t name_rq_status = packet[2];
+
+            if(idx >= 0 && name_rq_status == ERROR_CODE_SUCCESS) {
+                // name successfully retrieved for a device in our array
+                char* name = (char*) &packet[9];
+                discovered_devices[idx].name_state = DEVICE_NAME_KNOWN;
+
+                if (name_contains(name, target_name_substring)) {
+                    // this is our target device, connect to it
+                    connect(device_addr);
+                    break;
+                }
+
+            } else if (idx >= 0) {
+                // this is a device in our array but
+                // name not found successfully
+                discovered_devices[idx].name_state = DEVICE_NAME_KNOWN;
+                // we're giving up on trying to find the name
+            }
+
+            // if we're here, we know that we ONLY sent a name request,
+            // we didn't start a new scan session
+            // calling continue_discovery here will either file another name
+            // req, or restart the scan
+            continue_discovery();
+            break;
+
+        case HCI_EVENT_PIN_CODE_REQUEST:
+            // tried to pair via pin
+            // reject that pin code request
+
+            hci_event_pin_code_request_get_bd_addr(packet, event_address);
+            gap_pin_code_negative(event_address); // reject
+            break;
+        
+        case HCI_EVENT_USER_CONFIRMATION_REQUEST:
+            // modern confirmationr request to pair
+            hci_event_user_confirmation_request_get_bd_addr(packet, event_address);
+            gap_ssp_confirmation_response(event_address); // accept and pair
+            break;
+
+        case HCI_EVENT_HID_META: // hid specific events
+            int subevent_code = hci_event_hid_meta_get_subevent_code(packet);
+            switch(subevent_code) {
+                
+                case HID_SUBEVENT_CONNECTION_OPENED:
+                    status = hid_subevent_connection_opened_get_status(packet);
+                    if (status != ERROR_CODE_SUCCESS) {
+                        // need to rescan
+                        target_found = false;
+                        app_state = APP_SCANNING;
+                        num_devices_discovered = 0; // fill out array again
+                        gap_inquiry_start(INQUIRY_DURATION);
+                        break;
+                    }
+                    // succeeded
+
+                    connection_id = hid_subevent_connection_opened_get_hid_cid(packet);
+                    hid_descriptor_available = false;
+                    app_state = APP_CONNECTED;
+                    break;
+                
+                case HID_SUBEVENT_DESCRIPTOR_AVAILABLE:
+                    status = hid_subevent_descriptor_available_get_status(packet);
+                    if (status == ERROR_CODE_SUCCESS) {
+                        hid_descriptor_available = true;
+                        // tells our device how to interpret incoming packets
+                    }
+                    break;
+
+                case HID_SUBEVENT_REPORT:
+                    if (hid_descriptor_available) {
+                        handle_hid_report(
+                            hid_subevent_report_get_report(packet),
+                            hid_subevent_report_get_report_len(packet)
+                        );
+                    } else {
+                        // printf_hexdump(
+                        //     hid_subevent_report_get_report(packet),
+                        //     hid_subevent_report_get_report_len(packet)
+                        // );
+                    }
+                    break;
+
+                case HID_SUBEVENT_SET_PROTOCOL_RESPONSE:
+                    // setting which protocol that device will communicate with
+                    // need to handshake and agree
+                    break;
+                
+                case HID_SUBEVENT_CONNECTION_CLOSED:
+                    connection_id = 0;
+                    hid_descriptor_available = false;
+
+                    // rescan
+                    target_found = false;
+                    app_state = APP_SCANNING;
+                    num_devices_discovered = 0;
+                    gap_inquiry_start(INQUIRY_DURATION);
+                    break;
+                
+                default:
+                    break;
+            }
+            break;
+        
+        default:
             break;
 
     }
@@ -172,6 +288,18 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
 void bt_host_setup() {
     l2cap_init();
+
+    // SDP client/server: the hid host uses SDP to query the controller's
+    // HID SDP record (the report descriptor + PSMs) after L2CAP comes up
+    sdp_init(); // allows us to get HID descriptors
+
+    // require an encrypted link (Security Mode 4 / Level 2). the DualSense
+    // will not open the HID channels on an unencrypted connection
+    gap_set_security_level(LEVEL_2); // encrypted connection
+
+    // allow bonding: store the link key from SSP pairing so the controller
+    // stays paired instead of re-pairing (or failing) on every connect
+    gap_set_bondable_mode(1); // remember for future pairing
 
     hid_host_init(remote_descriptor_storage, sizeof(remote_descriptor_storage));
     hid_host_register_packet_handler(packet_handler);
