@@ -51,8 +51,8 @@ pico_enable_stdio_usb(ctrl 0)
 target_link_libraries(ctrl PRIVATE
         pico_stdlib
         tinyusb_device
-        pico_btstack_classic # btstack classic
-        pico
+        # pico_btstack_classic # btstack classic
+        pico_btstack_ble
         pico_btstack_cyw43 # connects bstack to the actual hardware drivers
         pico_cyw43_arch_none # bluetooth chip driver; no networking stack
     )
