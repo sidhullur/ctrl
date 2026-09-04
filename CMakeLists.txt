@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(ctrl main.c usb_descriptors.c bt_hid.c)
+add_executable(ctrl main.c usb_descriptors.c bt_hid_xbox.c)
 
 pico_set_program_name(ctrl "ctrl")
 pico_set_program_version(ctrl "0.1")
@@ -52,6 +52,7 @@ target_link_libraries(ctrl PRIVATE
         pico_stdlib
         tinyusb_device
         pico_btstack_classic # btstack classic
+        pico
         pico_btstack_cyw43 # connects bstack to the actual hardware drivers
         pico_cyw43_arch_none # bluetooth chip driver; no networking stack
     )
